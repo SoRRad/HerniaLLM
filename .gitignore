@@ -1,0 +1,34 @@
+# Environment and secrets — NEVER commit these
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Data — keep templates, exclude real patient data
+data/cases.csv
+data/ground_truth.csv
+
+# Outputs — exclude from repo (large files, patient-adjacent)
+outputs/transcripts/
+outputs/results/
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
