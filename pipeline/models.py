@@ -1,6 +1,6 @@
 """
 models.py
-Unified API wrappers for GPT-4o, Gemini 1.5 Pro, and Claude Sonnet.
+Unified API wrappers for GPT-4o, Gemini 1.5 Pro, Claude Sonnet, and Nemotron Super.
 Each wrapper returns (response_text, input_tokens, output_tokens).
 """
 
@@ -9,10 +9,11 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 
 # ── Model identifiers ───────────────────────────────────────────────────────
-MODEL_GPT4O   = "gpt-4o"
-MODEL_GEMINI  = "gemini-1.5-pro"
-MODEL_CLAUDE  = "claude-sonnet-4-20250514"
-MODEL_IDS     = [MODEL_GPT4O, MODEL_GEMINI, MODEL_CLAUDE]
+MODEL_GPT4O        = "gpt-4o"
+MODEL_GEMINI       = "gemini-1.5-pro"
+MODEL_CLAUDE       = "claude-sonnet-4-20250514"
+MODEL_NEMOTRON     = "nemotron-super"
+MODEL_IDS          = [MODEL_GPT4O, MODEL_GEMINI, MODEL_CLAUDE, MODEL_NEMOTRON]
 
 TEMPERATURE   = int(os.getenv("TEMPERATURE", 0))
 MAX_TOKENS    = 1024
@@ -88,6 +89,25 @@ def call_claude(messages: list[dict]) -> tuple[str, int, int]:
     return text, response.usage.input_tokens, response.usage.output_tokens
 
 
+# ── NVIDIA Nemotron Super 49B ────────────────────────────────────────────────
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+def call_nemotron(messages: list[dict]) -> tuple[str, int, int]:
+    from openai import OpenAI
+    client = OpenAI(
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key=os.getenv("NVIDIA_API_KEY"),
+    )
+    response = client.chat.completions.create(
+        model="nvidia/llama-3.3-nemotron-super-49b-v1",
+        messages=messages,
+        temperature=TEMPERATURE,
+        max_tokens=MAX_TOKENS,
+    )
+    text = response.choices[0].message.content.strip()
+    usage = response.usage
+    return text, usage.prompt_tokens, usage.completion_tokens
+
+
 # ── Unified caller ───────────────────────────────────────────────────────────
 def call_model(model_id: str, messages: list[dict]) -> tuple[str, int, int]:
     """
@@ -100,5 +120,7 @@ def call_model(model_id: str, messages: list[dict]) -> tuple[str, int, int]:
         return call_gemini(messages)
     elif model_id == MODEL_CLAUDE:
         return call_claude(messages)
+    elif model_id == MODEL_NEMOTRON:
+        return call_nemotron(messages)
     else:
         raise ValueError(f"Unknown model: {model_id}")

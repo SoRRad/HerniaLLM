@@ -79,3 +79,19 @@ This file contains the correct answers, filled in by your clinical adjudicator
 | `correct_management_summary` | Free text summary | `Urgent surgical referral, nil imaging needed` |
 | `adjudicator` | Who filled this in | `Dr Smith` |
 | `adjudication_date` | When adjudicated | `2024-10-01` |
+
+---
+
+## results.csv — Output Field Definitions
+
+### Model Classification
+
+| Column | Description | Allowed Values |
+|--------|-------------|----------------|
+| `Model_Type` | Category of the model arm | `LLM_Closed`, `LLM_Open`, `RAG`, `LLM_Closed_Manual` |
+
+**Model_Type definitions:**
+- `LLM_Closed` — Proprietary commercial API (GPT-4o, Gemini, Claude)
+- `LLM_Open` — Open-weight model hosted via API (Nemotron Super via NVIDIA NIM)
+- `RAG` — Retrieval-augmented generation system (OpenEvidence)
+- `LLM_Closed_Manual` — Closed model accessed manually without API (Copilot)

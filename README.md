@@ -100,6 +100,9 @@ You need three API keys. All have free tiers to start.
 3. Go to API Keys → **"Create Key"**
 4. Copy the key (starts with `sk-ant-...`)
 
+#### NVIDIA (Nemotron Super)
+Go to https://build.nvidia.com, sign in with a free account, click your profile → API Key → Generate Key. Free tier includes enough credits to run a full study pilot.
+
 ---
 
 ### Step 7 — Set Up Your API Keys
@@ -126,6 +129,19 @@ ANTHROPIC_API_KEY=sk-ant-...your key here...
 4. Fill in `data/ground_truth.csv` with your pre-specified correct answers
 
 See `data/COLUMN_GUIDE.md` for detailed instructions on each field.
+
+---
+
+## Supported Models
+
+| Model | Provider | Type | API | Key Needed | Notes |
+|-------|----------|------|-----|------------|-------|
+| GPT-4o | OpenAI | LLM_Closed | Yes | OPENAI_API_KEY | |
+| Gemini 1.5 Pro | Google | LLM_Closed | Yes | GOOGLE_API_KEY | |
+| Claude Sonnet 4 | Anthropic | LLM_Closed | Yes | ANTHROPIC_API_KEY | |
+| Llama Nemotron Super 49B | NVIDIA NIM | LLM_Open | Yes (OpenAI-compatible) | NVIDIA_API_KEY | Open weights, reproducible, free tier at build.nvidia.com |
+| OpenEvidence | OpenEvidence | RAG | Manual | — | Manual entry only |
+| Copilot | Microsoft | LLM_Closed_Manual | Manual | — | Manual entry only |
 
 ---
 

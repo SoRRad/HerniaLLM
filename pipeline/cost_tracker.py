@@ -24,6 +24,10 @@ PRICING = {
         "input":  3.00,
         "output": 15.00,
     },
+    "nemotron-super": {
+        "input":  0.40,
+        "output": 0.40,
+    },
     # Patient simulator (always GPT-4o)
     "patient-simulator": {
         "input":  2.50,

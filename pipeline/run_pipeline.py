@@ -29,11 +29,26 @@ colorama_init()
 # Add pipeline directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from models import call_model, MODEL_GPT4O, MODEL_GEMINI, MODEL_CLAUDE, MODEL_IDS
+from models import call_model, MODEL_GPT4O, MODEL_GEMINI, MODEL_CLAUDE, MODEL_NEMOTRON, MODEL_IDS
 from patient_sim import PatientSimulator
 from scoring import score_transcript, compute_red_flag_coverage
 from cost_tracker import CostTracker
 from danger_score import compute_danger_score, danger_result_to_dict, DangerInput
+
+
+# ── Model type classification ─────────────────────────────────────────────────
+MODEL_TYPE_MAP = {
+    "gpt-4o":                    "LLM_Closed",
+    "gpt-4o-mini":               "LLM_Closed",
+    "o3-mini":                   "LLM_Closed",
+    "gemini-1.5-pro":            "LLM_Closed",
+    "gemini-2.0-flash":          "LLM_Closed",
+    "claude-sonnet-4-20250514":  "LLM_Closed",
+    "claude-haiku-4-5-20251001": "LLM_Closed",
+    MODEL_NEMOTRON:              "LLM_Open",
+    "openevidence":              "RAG",
+    "copilot":                   "LLM_Closed_Manual",
+}
 
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -288,6 +303,7 @@ def main():
                         # Identifiers
                         "case_id":              case_id,
                         "model":                model_id,
+                        "Model_Type":           MODEL_TYPE_MAP.get(model_id, "Unknown"),
                         "prompt_type":          prompt_type,
                         "hernia_type_ground_truth": gt.get("ground_truth_hernia_type", ""),
                         "case_complexity":      case_row.get("case_complexity", ""),
