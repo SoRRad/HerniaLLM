@@ -1,4 +1,4 @@
-# Environment and secrets — NEVER commit these
+# Environment and secrets - NEVER commit these
 .env
 *.env
 
@@ -14,13 +14,17 @@ venv/
 dist/
 build/
 
-# Data — keep templates, exclude real patient data
+# Data - keep templates, exclude real patient data
 data/cases.csv
-data/ground_truth.csv
+data/ground_truth_real.csv
+data/*patient*
+data/*PHI*
 
-# Outputs — exclude from repo (large files, patient-adjacent)
-outputs/transcripts/
-outputs/results/
+# Outputs - exclude run artifacts and patient-adjacent files
+outputs/
+
+# Excel exports often contain reviewer notes or patient-adjacent data
+*.xlsx
 
 # VS Code
 .vscode/

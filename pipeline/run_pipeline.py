@@ -1,14 +1,15 @@
 """
-run_pipeline.py
 Main orchestrator for the HerniaLLM study pipeline.
 
-Usage:
-  python pipeline/run_pipeline.py                        # run everything
-  python pipeline/run_pipeline.py --model gpt-4o         # one model only
-  python pipeline/run_pipeline.py --prompt hard           # one prompt type
-  python pipeline/run_pipeline.py --test                  # first 3 cases only
+Examples:
+  python pipeline/run_pipeline.py
+  python pipeline/run_pipeline.py --model gpt-4o
+  python pipeline/run_pipeline.py --prompt hard
+  python pipeline/run_pipeline.py --test
   python pipeline/run_pipeline.py --model gemini-1.5-pro --prompt zero
 """
+
+from __future__ import annotations
 
 import argparse
 import csv
@@ -19,46 +20,77 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from dotenv import load_dotenv
-from colorama import Fore, Style, init as colorama_init
-from tqdm import tqdm
+try:
+    from colorama import Fore, Style, init as colorama_init
+except ImportError:
+    class _PlainColors:
+        BLACK = RED = GREEN = YELLOW = BLUE = MAGENTA = CYAN = WHITE = RESET_ALL = ""
+
+    Fore = Style = _PlainColors()
+
+    def colorama_init() -> None:
+        return None
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv() -> None:
+        return None
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, desc=None):
+        return iterable
 
 load_dotenv()
 colorama_init()
 
-# Add pipeline directory to path
+# Add the pipeline directory to the import path when this file is run directly.
 sys.path.insert(0, str(Path(__file__).parent))
 
-from models import call_model, MODEL_GPT4O, MODEL_GEMINI, MODEL_CLAUDE, MODEL_NEMOTRON, MODEL_IDS
-from patient_sim import PatientSimulator
-from scoring import score_transcript, compute_red_flag_coverage
-from cost_tracker import CostTracker
-from danger_score import compute_danger_score, danger_result_to_dict, DangerInput
+from validate_inputs import validate_inputs
+
+RUNTIME_IMPORT_ERROR: Exception | None = None
+
+try:
+    from cost_tracker import CostTracker
+    from danger_score import DangerInput, compute_danger_score, danger_result_to_dict
+    from models import MODEL_IDS, MODEL_NEMOTRON, call_model
+    from patient_sim import PatientSimulator
+    from scoring import compute_red_flag_coverage, score_transcript
+except Exception as exc:
+    # Keep --help and input validation usable before dependencies are installed.
+    RUNTIME_IMPORT_ERROR = exc
+    MODEL_NEMOTRON = "nemotron-super"
+    MODEL_IDS = [
+        "gpt-4o",
+        "gemini-1.5-pro",
+        "claude-sonnet-4-20250514",
+        "nemotron-super",
+    ]
 
 
-# ── Model type classification ─────────────────────────────────────────────────
 MODEL_TYPE_MAP = {
-    "gpt-4o":                    "LLM_Closed",
-    "gpt-4o-mini":               "LLM_Closed",
-    "o3-mini":                   "LLM_Closed",
-    "gemini-1.5-pro":            "LLM_Closed",
-    "gemini-2.0-flash":          "LLM_Closed",
-    "claude-sonnet-4-20250514":  "LLM_Closed",
+    "gpt-4o": "LLM_Closed",
+    "gpt-4o-mini": "LLM_Closed",
+    "o3-mini": "LLM_Closed",
+    "gemini-1.5-pro": "LLM_Closed",
+    "gemini-2.0-flash": "LLM_Closed",
+    "claude-sonnet-4-20250514": "LLM_Closed",
     "claude-haiku-4-5-20251001": "LLM_Closed",
-    MODEL_NEMOTRON:              "LLM_Open",
-    "openevidence":              "RAG",
-    "copilot":                   "LLM_Closed_Manual",
+    MODEL_NEMOTRON: "LLM_Open",
+    "openevidence": "RAG",
+    "copilot": "LLM_Closed_Manual",
 }
 
-
-# ── Configuration ────────────────────────────────────────────────────────────
 MAX_QUESTIONS = int(os.getenv("MAX_QUESTIONS", 20))
-RATE_LIMIT_DELAY = 2  # seconds between API calls
+RATE_LIMIT_DELAY = 2
 
 PROMPT_TYPES = ["zero", "soft", "hard"]
-PHASES = [1, 2]
+PHASE2_MODES = ["model_dx", "ground_truth_dx"]
+ERROR_COLUMNS = ["case_id", "model", "prompt_type", "phase2_mode", "error", "run_timestamp"]
 
-# Prompt templates
 SYSTEM_PROMPTS = {
     "zero": "",
     "soft": (
@@ -90,41 +122,79 @@ PHASE2_PROMPT = (
 )
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def load_csv(path: str) -> list[dict]:
-    with open(path, newline="", encoding="utf-8") as f:
+def load_csv(path: str | Path) -> list[dict]:
+    with Path(path).open(newline="", encoding="utf-8-sig") as f:
         return list(csv.DictReader(f))
 
 
-def save_transcript(transcript: list[dict], path: str):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+def save_transcript(transcript: list[dict], path: str | Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
         json.dump(transcript, f, indent=2, ensure_ascii=False)
 
 
-def append_result_row(row: dict, path: str, write_header: bool):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=row.keys())
+def append_result_row(row: dict, path: str | Path, write_header: bool) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
         if write_header:
             writer.writeheader()
         writer.writerow(row)
 
 
-def log(msg: str, color=Fore.WHITE):
+def initialize_csv(path: str | Path, fieldnames: list[str]) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        csv.DictWriter(f, fieldnames=fieldnames).writeheader()
+
+
+def log(msg: str, color=Fore.WHITE) -> None:
     print(f"{color}{msg}{Style.RESET_ALL}")
 
 
-# ── Phase 1: Diagnostic conversation ─────────────────────────────────────────
+def safe_file_part(value: str) -> str:
+    """Keep transcript filenames portable across operating systems."""
+    return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in value)
+
+
+def create_run_directory() -> Path:
+    """Create outputs/runs/YYYYMMDD_HHMMSS and update outputs/latest_run.txt."""
+    base_dir = Path("outputs") / "runs"
+
+    while True:
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = base_dir / run_id
+        try:
+            run_dir.mkdir(parents=True, exist_ok=False)
+            break
+        except FileExistsError:
+            time.sleep(1)
+
+    (run_dir / "transcripts").mkdir()
+    (run_dir / "results").mkdir()
+
+    latest_path = Path("outputs") / "latest_run.txt"
+    latest_path.parent.mkdir(parents=True, exist_ok=True)
+    latest_path.write_text(run_dir.as_posix() + "\n", encoding="utf-8")
+
+    return run_dir
+
+
 def run_phase1(
     case_row: dict,
     model_id: str,
     prompt_type: str,
     cost_tracker: CostTracker,
-) -> tuple[list[dict], dict, str, int, int]:
+) -> tuple[list[dict], list[dict], str, int, int]:
     """
     Run the iterative diagnostic conversation.
-    Returns (transcript, metrics_raw, final_diagnosis, total_in_tok, total_out_tok).
+
+    Returns:
+        transcript, full message history, final diagnosis text, input tokens,
+        output tokens.
     """
     sim = PatientSimulator(case_row)
     transcript: list[dict] = []
@@ -135,9 +205,9 @@ def run_phase1(
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
 
-    # Opening patient statement
     opening = (
-        f"Hi doctor, I'm here because I've noticed {case_row.get('chief_complaint', 'a problem')}."
+        f"Hi doctor, I'm here because I've noticed "
+        f"{case_row.get('chief_complaint', 'a problem')}."
     )
     messages.append({"role": "user", "content": opening})
     transcript.append({"role": "patient", "content": opening, "turn": 0})
@@ -148,27 +218,24 @@ def run_phase1(
     diagnosis_reached = False
 
     for turn in range(1, MAX_QUESTIONS + 1):
-        # LLM asks a question
         response, in_tok, out_tok = call_model(model_id, messages)
-        total_in  += in_tok
+        total_in += in_tok
         total_out += out_tok
         cost_tracker.log(case_id, model_id, prompt_type, 1, in_tok, out_tok)
 
         messages.append({"role": "assistant", "content": response})
         transcript.append({"role": "llm", "content": response, "turn": turn})
 
-        # Check if diagnosis has been stated
-        if "my diagnosis is" in response.lower() or "likely diagnosis" in response.lower():
+        response_lower = response.lower()
+        if "my diagnosis is" in response_lower or "likely diagnosis" in response_lower:
             final_diagnosis = response
             diagnosis_reached = True
-            log(f"   ✓ Diagnosis reached at turn {turn}", Fore.GREEN)
+            log(f"   Diagnosis reached at turn {turn}", Fore.GREEN)
             break
 
-        # Patient responds
         patient_reply, p_in, p_out = sim.respond(response)
-        total_in  += p_in
+        total_in += p_in
         total_out += p_out
-        # Log simulator cost separately
         cost_tracker.log(case_id, "patient-simulator", prompt_type, 1, p_in, p_out)
 
         messages.append({"role": "user", "content": patient_reply})
@@ -176,12 +243,11 @@ def run_phase1(
         time.sleep(RATE_LIMIT_DELAY)
 
     if not diagnosis_reached:
-        log(f"   ⚠ Max questions reached without diagnosis", Fore.YELLOW)
+        log("   Max questions reached without diagnosis", Fore.YELLOW)
 
     return transcript, messages, final_diagnosis, total_in, total_out
 
 
-# ── Phase 2: Management planning ─────────────────────────────────────────────
 def run_phase2(
     messages: list[dict],
     diagnosis: str,
@@ -191,11 +257,13 @@ def run_phase2(
     cost_tracker: CostTracker,
 ) -> tuple[list[dict], int, int]:
     """
-    Append Phase 2 management prompt and get LLM response.
-    Returns (phase2_transcript, in_tokens, out_tokens).
+    Append the Phase 2 management prompt and get the LLM response.
+
+    Returns:
+        phase 2 transcript, input tokens, output tokens.
     """
     if not diagnosis:
-        diagnosis = "uncertain — diagnosis not reached in Phase 1"
+        diagnosis = "uncertain - diagnosis not reached in Phase 1"
 
     phase2_prompt = PHASE2_PROMPT.format(diagnosis=diagnosis)
     messages.append({"role": "user", "content": phase2_prompt})
@@ -205,40 +273,71 @@ def run_phase2(
 
     transcript = [
         {"role": "researcher", "content": phase2_prompt},
-        {"role": "llm",        "content": response},
+        {"role": "llm", "content": response},
     ]
     return transcript, in_tok, out_tok
 
 
-# ── Main pipeline ─────────────────────────────────────────────────────────────
-def main():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="HerniaLLM study pipeline")
-    parser.add_argument("--cases",  default="data/cases.csv",        help="Path to cases CSV")
-    parser.add_argument("--gt",     default="data/ground_truth.csv", help="Path to ground truth CSV")
-    parser.add_argument("--model",  default=None, choices=MODEL_IDS + [None], help="Run one model only")
-    parser.add_argument("--prompt", default=None, choices=PROMPT_TYPES + [None], help="Run one prompt type only")
-    parser.add_argument("--test",   action="store_true", help="Run first 3 cases only")
-    args = parser.parse_args()
+    parser.add_argument("--cases", default="data/cases.csv", help="Path to cases CSV")
+    parser.add_argument("--gt", default="data/ground_truth.csv", help="Path to ground truth CSV")
+    parser.add_argument("--model", default=None, choices=MODEL_IDS, help="Run one model only")
+    parser.add_argument("--prompt", default=None, choices=PROMPT_TYPES, help="Run one prompt type only")
+    parser.add_argument("--test", action="store_true", help="Run first 3 cases only")
+    parser.add_argument(
+        "--phase2-mode",
+        default="model_dx",
+        choices=PHASE2_MODES,
+        help=(
+            "Use the model's Phase 1 diagnosis for Phase 2 (model_dx), "
+            "or supply the ground truth diagnosis (ground_truth_dx)."
+        ),
+    )
+    return parser
 
-    # Load data
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    if not validate_inputs(args.cases, args.gt):
+        log("\nPipeline stopped before loading data or making any API calls.", Fore.RED)
+        return 1
+
+    if RUNTIME_IMPORT_ERROR is not None:
+        log("\nPipeline dependencies are not fully installed.", Fore.RED)
+        log("Run this once, then try again:", Fore.YELLOW)
+        log("  pip install -r requirements.txt", Fore.YELLOW)
+        log(f"Details: {RUNTIME_IMPORT_ERROR}", Fore.RED)
+        return 1
+
     cases = load_csv(args.cases)
     gt_rows = load_csv(args.gt)
-    gt_by_id = {r["case_id"]: r for r in gt_rows}
+    gt_by_id = {row["case_id"]: row for row in gt_rows}
 
     if args.test:
         cases = cases[:3]
-        log("🧪 TEST MODE — running first 3 cases only", Fore.CYAN)
+        log("TEST MODE: running first 3 cases only", Fore.CYAN)
 
-    models_to_run  = [args.model]  if args.model  else MODEL_IDS
+    models_to_run = [args.model] if args.model else MODEL_IDS
     prompts_to_run = [args.prompt] if args.prompt else PROMPT_TYPES
 
-    results_path  = "outputs/results/results.csv"
-    danger_path   = "outputs/results/danger_scores.csv"
-    cost_tracker  = CostTracker()
+    run_dir = create_run_directory()
+    transcripts_dir = run_dir / "transcripts"
+    results_dir = run_dir / "results"
+    results_path = results_dir / "results.csv"
+    danger_path = results_dir / "danger_scores.csv"
+    errors_path = results_dir / "errors.csv"
+    cost_log_path = results_dir / "cost_log.csv"
+    cost_summary_path = results_dir / "cost_summary.csv"
+    initialize_csv(errors_path, ERROR_COLUMNS)
+
+    cost_tracker = CostTracker(output_path=str(cost_log_path))
     header_written = {"results": False, "danger": False}
 
     total_runs = len(cases) * len(models_to_run) * len(prompts_to_run)
-    log(f"\n🚀 Starting pipeline — {total_runs} total runs\n", Fore.CYAN)
+    log(f"\nStarting pipeline: {total_runs} total runs", Fore.CYAN)
+    log(f"Run directory: {run_dir.as_posix()}\n", Fore.CYAN)
 
     run_count = 0
     for case_row in tqdm(cases, desc="Cases"):
@@ -251,147 +350,191 @@ def main():
                 label = f"[{run_count}/{total_runs}] {case_id} | {model_id} | {prompt_type}"
                 log(f"\n{label}", Fore.CYAN)
 
+                safe_model = safe_file_part(model_id)
+                safe_prompt = safe_file_part(prompt_type)
+                p1_transcript_path = (
+                    transcripts_dir / f"{case_id}_{safe_model}_{safe_prompt}_phase1.json"
+                )
+                p2_transcript_path = (
+                    transcripts_dir / f"{case_id}_{safe_model}_{safe_prompt}_phase2.json"
+                )
+
                 try:
-                    # ── Phase 1 ──────────────────────────────────────────
                     p1_transcript, messages, diagnosis, p1_in, p1_out = run_phase1(
                         case_row, model_id, prompt_type, cost_tracker
                     )
-                    save_transcript(
-                        p1_transcript,
-                        f"outputs/transcripts/{case_id}_{model_id}_{prompt_type}_phase1.json"
-                    )
+                    save_transcript(p1_transcript, p1_transcript_path)
 
-                    # Score Phase 1
                     p1_scores = score_transcript(p1_transcript, gt, phase=1)
                     rf_coverage = compute_red_flag_coverage(p1_scores, gt)
 
-                    # ── Phase 2 ──────────────────────────────────────────
-                    p2_transcript, p2_in, p2_out = run_phase2(
-                        messages, diagnosis, case_id, model_id, prompt_type, cost_tracker
-                    )
-                    save_transcript(
-                        p2_transcript,
-                        f"outputs/transcripts/{case_id}_{model_id}_{prompt_type}_phase2.json"
-                    )
+                    phase2_diagnosis = diagnosis
+                    if args.phase2_mode == "ground_truth_dx":
+                        phase2_diagnosis = gt.get("ground_truth_diagnosis", "")
 
-                    # Score Phase 2
+                    p2_transcript, p2_in, p2_out = run_phase2(
+                        messages,
+                        phase2_diagnosis,
+                        case_id,
+                        model_id,
+                        prompt_type,
+                        cost_tracker,
+                    )
+                    save_transcript(p2_transcript, p2_transcript_path)
+
                     p2_scores = score_transcript(p2_transcript, gt, phase=2)
 
-                    # ── Danger Score ──────────────────────────────────────
                     danger_input = DangerInput(
                         case_id=case_id,
                         model=model_id,
                         prompt_type=prompt_type,
                         phase=2,
                         correct_diagnosis=bool(p1_scores.get("correct_diagnosis", False)),
-                        missed_critical_red_flag=bool(p1_scores.get("missed_critical_red_flag", False)),
-                        n_missed_non_critical_flags=sum([
-                            not p1_scores.get("red_flag_pain_asked", True),
-                            not p1_scores.get("red_flag_skin_changes_asked", True),
-                            not p1_scores.get("red_flag_obstructive_asked", True),
-                            not p1_scores.get("red_flag_reducibility_asked", True),
-                            not p1_scores.get("red_flag_systemically_unwell_asked", True),
-                        ]),
-                        unsafe_recommendation=bool(p2_scores.get("unsafe_recommendation", False)),
+                        missed_critical_red_flag=bool(
+                            p1_scores.get("missed_critical_red_flag", False)
+                        ),
+                        n_missed_non_critical_flags=sum(
+                            [
+                                not p1_scores.get("red_flag_pain_asked", True),
+                                not p1_scores.get("red_flag_skin_changes_asked", True),
+                                not p1_scores.get("red_flag_obstructive_asked", True),
+                                not p1_scores.get("red_flag_reducibility_asked", True),
+                                not p1_scores.get("red_flag_systemically_unwell_asked", True),
+                            ]
+                        ),
+                        unsafe_recommendation=bool(
+                            p2_scores.get("unsafe_recommendation", False)
+                        ),
                         urgency_correct=bool(p2_scores.get("urgency_correct", True)),
                     )
                     danger_result = compute_danger_score(danger_input)
-                    danger_dict   = danger_result_to_dict(danger_result)
+                    danger_dict = danger_result_to_dict(danger_result)
 
-                    # ── Build result row ──────────────────────────────────
                     result_row = {
-                        # Identifiers
-                        "case_id":              case_id,
-                        "model":                model_id,
-                        "Model_Type":           MODEL_TYPE_MAP.get(model_id, "Unknown"),
-                        "prompt_type":          prompt_type,
+                        "case_id": case_id,
+                        "model": model_id,
+                        "Model_Type": MODEL_TYPE_MAP.get(model_id, "Unknown"),
+                        "prompt_type": prompt_type,
+                        "phase2_mode": args.phase2_mode,
                         "hernia_type_ground_truth": gt.get("ground_truth_hernia_type", ""),
-                        "case_complexity":      case_row.get("case_complexity", ""),
-                        "run_timestamp":        datetime.now().isoformat(),
-
-                        # Phase 1 — diagnosis
-                        "final_diagnosis":             p1_scores.get("final_diagnosis", ""),
-                        "correct_diagnosis":            p1_scores.get("correct_diagnosis", ""),
-                        "diagnosis_in_differential":    p1_scores.get("diagnosis_in_differential", ""),
-                        "questions_to_diagnosis":       p1_scores.get("questions_to_final_diagnosis", ""),
-                        "total_questions_asked":        p1_scores.get("total_questions_asked", ""),
-                        "relevant_questions":           p1_scores.get("relevant_questions", ""),
-                        "irrelevant_questions":         p1_scores.get("irrelevant_questions", ""),
-                        "redundant_questions":          p1_scores.get("redundant_questions", ""),
-
-                        # Red flag screening
-                        "red_flag_pain_asked":              p1_scores.get("red_flag_pain_asked", ""),
-                        "red_flag_skin_changes_asked":      p1_scores.get("red_flag_skin_changes_asked", ""),
-                        "red_flag_obstructive_asked":       p1_scores.get("red_flag_obstructive_asked", ""),
-                        "red_flag_reducibility_asked":      p1_scores.get("red_flag_reducibility_asked", ""),
-                        "red_flag_systemically_unwell_asked":p1_scores.get("red_flag_systemically_unwell_asked",""),
-                        "missed_critical_red_flag":         p1_scores.get("missed_critical_red_flag", ""),
-                        "red_flag_coverage_score":          rf_coverage,
-
-                        # Clinical context
-                        "past_surgical_history_asked": p1_scores.get("past_surgical_history_asked", ""),
-                        "anticoagulation_asked":        p1_scores.get("anticoagulation_asked", ""),
-                        "pregnancy_asked":              p1_scores.get("pregnancy_asked", ""),
-                        "comorbidities_asked":          p1_scores.get("comorbidities_asked", ""),
-                        "expressed_uncertainty":        p1_scores.get("expressed_uncertainty", ""),
-                        "overconfidence":               p1_scores.get("overconfidence", ""),
-                        "important_features_missed":    p1_scores.get("important_features_missed", ""),
-
-                        # Phase 2 — management
-                        "appropriate_imaging":          p2_scores.get("appropriate_imaging_recommended", ""),
-                        "appropriate_referral":         p2_scores.get("appropriate_referral", ""),
-                        "urgency_correct":              p2_scores.get("urgency_correct", ""),
-                        "overtesting_present":          p2_scores.get("overtesting_present", ""),
-                        "overmanagement_present":       p2_scores.get("overmanagement_present", ""),
-                        "unsafe_recommendation":        p2_scores.get("unsafe_recommendation", ""),
-                        "severity_safety_issue":        p2_scores.get("severity_safety_issue", ""),
-
-                        # Clinical Danger Score
-                        "danger_score":                 danger_dict["danger_score"],
-                        "danger_tier":                  danger_dict["danger_tier"],
-
-                        # Reviewer columns (blank — filled in manually after review)
-                        "reviewer_id":                  "",
-                        "overall_clinical_utility_score":"",
-                        "empathy_score":                "",
-                        "actionability_score":          "",
-                        "readability_grade_level":      "",
-                        "reviewer_notes":               "",
+                        "case_complexity": case_row.get("case_complexity", ""),
+                        "run_timestamp": datetime.now().isoformat(),
+                        "transcript_phase1_path": p1_transcript_path.as_posix(),
+                        "transcript_phase2_path": p2_transcript_path.as_posix(),
+                        "final_diagnosis": p1_scores.get("final_diagnosis", ""),
+                        "correct_diagnosis": p1_scores.get("correct_diagnosis", ""),
+                        "diagnosis_in_differential": p1_scores.get(
+                            "diagnosis_in_differential", ""
+                        ),
+                        "questions_to_diagnosis": p1_scores.get(
+                            "questions_to_final_diagnosis", ""
+                        ),
+                        "total_questions_asked": p1_scores.get("total_questions_asked", ""),
+                        "relevant_questions": p1_scores.get("relevant_questions", ""),
+                        "irrelevant_questions": p1_scores.get("irrelevant_questions", ""),
+                        "redundant_questions": p1_scores.get("redundant_questions", ""),
+                        "red_flag_pain_asked": p1_scores.get("red_flag_pain_asked", ""),
+                        "red_flag_skin_changes_asked": p1_scores.get(
+                            "red_flag_skin_changes_asked", ""
+                        ),
+                        "red_flag_obstructive_asked": p1_scores.get(
+                            "red_flag_obstructive_asked", ""
+                        ),
+                        "red_flag_reducibility_asked": p1_scores.get(
+                            "red_flag_reducibility_asked", ""
+                        ),
+                        "red_flag_systemically_unwell_asked": p1_scores.get(
+                            "red_flag_systemically_unwell_asked", ""
+                        ),
+                        "missed_critical_red_flag": p1_scores.get(
+                            "missed_critical_red_flag", ""
+                        ),
+                        "red_flag_coverage_score": rf_coverage,
+                        "past_surgical_history_asked": p1_scores.get(
+                            "past_surgical_history_asked", ""
+                        ),
+                        "anticoagulation_asked": p1_scores.get("anticoagulation_asked", ""),
+                        "pregnancy_asked": p1_scores.get("pregnancy_asked", ""),
+                        "comorbidities_asked": p1_scores.get("comorbidities_asked", ""),
+                        "expressed_uncertainty": p1_scores.get("expressed_uncertainty", ""),
+                        "overconfidence": p1_scores.get("overconfidence", ""),
+                        "important_features_missed": p1_scores.get(
+                            "important_features_missed", ""
+                        ),
+                        "appropriate_imaging": p2_scores.get(
+                            "appropriate_imaging_recommended", ""
+                        ),
+                        "appropriate_referral": p2_scores.get("appropriate_referral", ""),
+                        "urgency_correct": p2_scores.get("urgency_correct", ""),
+                        "overtesting_present": p2_scores.get("overtesting_present", ""),
+                        "overmanagement_present": p2_scores.get(
+                            "overmanagement_present", ""
+                        ),
+                        "unsafe_recommendation": p2_scores.get(
+                            "unsafe_recommendation", ""
+                        ),
+                        "severity_safety_issue": p2_scores.get(
+                            "severity_safety_issue", ""
+                        ),
+                        "danger_score": danger_dict["danger_score"],
+                        "danger_tier": danger_dict["danger_tier"],
+                        "reviewer_id": "",
+                        "overall_clinical_utility_score": "",
+                        "empathy_score": "",
+                        "actionability_score": "",
+                        "readability_grade_level": "",
+                        "reviewer_notes": "",
                     }
 
-                    write_hdr = not header_written["results"]
-                    append_result_row(result_row, results_path, write_hdr)
+                    append_result_row(
+                        result_row,
+                        results_path,
+                        write_header=not header_written["results"],
+                    )
                     header_written["results"] = True
 
-                    write_hdr_d = not header_written["danger"]
-                    append_result_row(danger_dict, danger_path, write_hdr_d)
+                    append_result_row(
+                        danger_dict,
+                        danger_path,
+                        write_header=not header_written["danger"],
+                    )
                     header_written["danger"] = True
 
-                    log(f"   ✓ Saved | Danger: {danger_dict['danger_score']} ({danger_dict['danger_tier']})",
-                        Fore.GREEN)
+                    log(
+                        f"   Saved. Danger: {danger_dict['danger_score']} "
+                        f"({danger_dict['danger_tier']})",
+                        Fore.GREEN,
+                    )
 
-                except Exception as e:
-                    log(f"   ✗ Error: {e}", Fore.RED)
-                    # Save error row so we know which run failed
+                except Exception as exc:
+                    log(f"   Error: {exc}", Fore.RED)
                     error_row = {
-                        "case_id": case_id, "model": model_id,
-                        "prompt_type": prompt_type, "error": str(e),
+                        "case_id": case_id,
+                        "model": model_id,
+                        "prompt_type": prompt_type,
+                        "phase2_mode": args.phase2_mode,
+                        "error": str(exc),
                         "run_timestamp": datetime.now().isoformat(),
                     }
-                    append_result_row(error_row, "outputs/results/errors.csv",
-                                      not os.path.exists("outputs/results/errors.csv"))
+                    append_result_row(
+                        error_row,
+                        errors_path,
+                        write_header=False,
+                    )
 
                 time.sleep(RATE_LIMIT_DELAY)
 
-    # ── Save cost outputs ─────────────────────────────────────────────────────
     cost_tracker.save()
-    cost_tracker.save_summary()
+    cost_tracker.save_summary(str(cost_summary_path))
 
-    log(f"\n✅ Pipeline complete — {run_count} runs finished", Fore.GREEN)
-    log(f"   Results  → {results_path}", Fore.GREEN)
-    log(f"   Danger   → {danger_path}", Fore.GREEN)
-    log(f"   Costs    → outputs/results/cost_summary.csv\n", Fore.GREEN)
+    log(f"\nPipeline complete: {run_count} runs finished", Fore.GREEN)
+    log(f"Run directory: {run_dir.as_posix()}", Fore.GREEN)
+    log(f"Results: {results_path.as_posix()}", Fore.GREEN)
+    log(f"Danger scores: {danger_path.as_posix()}", Fore.GREEN)
+    log(f"Cost summary: {cost_summary_path.as_posix()}\n", Fore.GREEN)
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -5,7 +5,23 @@ Each wrapper returns (response_text, input_tokens, output_tokens).
 """
 
 import os
-from tenacity import retry, stop_after_attempt, wait_exponential
+
+try:
+    from tenacity import retry, stop_after_attempt, wait_exponential
+except ImportError:
+    # Allow help screens and smoke tests to import this module before the full
+    # requirements are installed. Runtime setup still checks for tenacity.
+    def retry(*_args, **_kwargs):
+        def decorator(func):
+            return func
+
+        return decorator
+
+    def stop_after_attempt(*_args, **_kwargs):
+        return None
+
+    def wait_exponential(*_args, **_kwargs):
+        return None
 
 
 # ── Model identifiers ───────────────────────────────────────────────────────

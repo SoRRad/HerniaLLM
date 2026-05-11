@@ -79,10 +79,9 @@ class CostTracker:
 
     def save(self):
         """Write per-interaction cost log."""
-        if not self.runs:
-            return
         fieldnames = ["timestamp", "case_id", "model", "prompt_type",
                       "phase", "input_tokens", "output_tokens", "cost_usd"]
+        os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
         with open(self.output_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
